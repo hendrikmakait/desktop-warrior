@@ -8,39 +8,33 @@ from openai.types.chat import (
     ChatCompletionMessageParam,
     ChatCompletionToolMessageParam,
 )
+from .tool_registry import Options, Tool, ToolRegistry
 
-TOOLS: Final[list[ChatCompletionFunctionToolParam]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "ls",
-            "description": "list directory contents",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "The path to the directory, e.g., ~/Desktop",
-                    },
+REGISTRY = ToolRegistry()
+
+REGISTRY.register(
+    Tool(
+        "ls",
+        "list directory contents",
+        {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The path to the directory, e.g., User/hendrikmakait/Desktop",
                 },
-                "required": ["path"],
             },
+            "required": ["path"],
         },
-    },
-]
+        lambda args: os.listdir(args["path"]),
+        False,
+    )
+)
 
 
-def execute_tool(
-    call: ChatCompletionMessageFunctionToolCall,
-) -> ChatCompletionToolMessageParam:
-    func = call.function.name
-    args = json.loads(call.function.arguments)
-
-    if func == "ls":
-        output = os.listdir(args["path"])
-    else:
-        output = "Unknown tool"
-    return {"role": "tool", "tool_call_id": call.id, "content": json.dumps(output)}
+def confirm_tool_call(call: ChatCompletionMessageFunctionToolCall) -> bool:
+    print(f"The assistant wants to call {json.dumps(call)}")
+    return input("Allow this action? (y/n): ") == "y"
 
 
 def agent(client: OpenAI, model: str, system: str) -> None:
@@ -53,7 +47,9 @@ def agent(client: OpenAI, model: str, system: str) -> None:
         agent_turn = True
         while agent_turn:
             completion = client.chat.completions.create(
-                model=model, messages=messages, tools=TOOLS
+                model=model,
+                messages=messages,
+                tools=REGISTRY.get_tools(),
             )
             response = completion.choices[0].message
             messages.append(response)
@@ -61,9 +57,11 @@ def agent(client: OpenAI, model: str, system: str) -> None:
             if response.tool_calls:
                 # When thinking out loud, print thoughts
                 if response.content:
-                    print(response.content)
-                for tool_call in response.tool_calls:
-                    messages.append(execute_tool(tool_call))
+                    print(f"Assistant (thinking): {response.content}")
+                tool_responses = REGISTRY.execute(
+                    response.tool_calls, options=Options(confirm=confirm_tool_call)
+                )
+                messages.extend(tool_responses)
                 agent_turn = True
             else:
                 # Regular response - print and exit inner loop
